@@ -1,0 +1,44 @@
+name: Deploy to GitHub Pages
+
+on:
+  push:
+    branches: [ site ]    # auto when the importer pushes to 'site'
+  workflow_dispatch: {}   # allow manual runs from Actions
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+concurrency:
+  group: pages
+  cancel-in-progress: true
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      # If this file is on the site branch, runner will already be on 'site'.
+      # If you trigger manually from main, explicitly check out 'site'.
+      - uses: actions/checkout@v4
+        with:
+          ref: site
+      - name: Show files that will be deployed
+        run: |
+          ls -la
+          test -f index.html || { echo "::error::No index.html in site branch"; exit 1; }
+          touch .nojekyll
+      - name: Upload Pages artifact
+        uses: actions/upload-pages-artifact@v3
+        with:
+          path: .
+
+  deploy:
+    needs: build
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - id: deployment
+        uses: actions/deploy-pages@v4
