@@ -1,0 +1,42 @@
+name: Prune old ZIPs in incoming/
+
+on:
+  workflow_dispatch:
+    inputs:
+      keep:
+        description: 'How many newest ZIPs to keep'
+        required: false
+        default: '5'
+  schedule:
+    - cron: '0 3 * * 1'  # Mondays 03:00 UTC
+
+permissions:
+  contents: write
+
+jobs:
+  prune:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with: { fetch-depth: 0 }
+
+      - name: Delete older ZIPs
+        shell: bash
+        run: |
+          set -euo pipefail
+          keep=${{ github.event.inputs.keep || '5' }}
+          echo "Keeping $keep newest ZIPs under incoming/"
+
+          mapfile -t files < <(find incoming -type f -name '*.zip' -printf '%T@|%p\n' 2>/dev/null | sort -nr | cut -d'|' -f2)
+          count=${#files[@]}
+          echo "Found $count zips"
+          if (( count > keep )); then
+            for f in "${files[@]:$keep}"; do
+              echo "Deleting $f"
+              git rm -f "$f"
+            done
+            git commit -m "Prune incoming/: keep $keep newest ZIPs"
+            git push
+          else
+            echo "Nothing to prune."
+          fi
