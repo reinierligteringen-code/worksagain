@@ -1,0 +1,119 @@
+name: Import website ZIP
+
+on:
+  push:
+    branches: [ main ]
+    paths:
+      - 'incoming/*.zip'
+      - 'incoming/**/*.zip'
+  workflow_dispatch:
+    inputs:
+      zip_path:
+        description: 'Exact ZIP under incoming/, e.g. incoming/site-2025-11-08.zip (blank = newest)'
+        required: false
+        default: ''
+      target_branch:
+        description: 'Branch to publish site files into'
+        required: false
+        default: 'site'
+
+permissions:
+  contents: write
+
+concurrency:
+  group: import-website
+  cancel-in-progress: true
+
+jobs:
+  import:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with: { fetch-depth: 0 }
+
+      # Pick the user-provided ZIP or the newest one under incoming/
+      - name: Pick ZIP (manual or newest)
+        id: pick
+        shell: bash
+        run: |
+          set -euo pipefail
+          in="${{ github.event.inputs.zip_path || '' }}"
+          if [[ -z "$in" ]]; then
+            mapfile -t lines < <(find incoming -type f -name '*.zip' -printf '%T@|%p\n' 2>/dev/null | sort -nr)
+            [[ ${#lines[@]} -gt 0 ]] || { echo "::error::No ZIPs under incoming/"; exit 1; }
+            in="${lines[0]#*|}"
+          fi
+          echo "zip=$in" >> "$GITHUB_OUTPUT"
+          echo "Using ZIP: $in"
+
+      # Helpful diagnostics if something goes wrong
+      - name: Debug chosen ZIP
+        run: |
+          echo "pwd: $(pwd)"
+          echo "::group::incoming listing"
+          ls -la incoming || true
+          echo "::endgroup::"
+          echo "Chosen ZIP: ${{ steps.pick.outputs.zip }}"
+          ls -l "${{ steps.pick.outputs.zip }}" || true
+          echo "::group::ZIP contents"
+          unzip -l "${{ steps.pick.outputs.zip }}" || true
+          echo "::endgroup::"
+
+      - name: Extract ZIP
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p "$RUNNER_TEMP/site_new"
+          unzip -q "${{ steps.pick.outputs.zip }}" -d "$RUNNER_TEMP/site_new"
+
+          # Flatten if the ZIP had a single top-level folder
+          if [ "$(find "$RUNNER_TEMP/site_new" -mindepth 1 -maxdepth 1 -type d | wc -l)" -eq 1 ] && \
+             [ "$(ls -1 "$RUNNER_TEMP/site_new" | wc -l)" -eq 1 ]; then
+            inner=$(find "$RUNNER_TEMP/site_new" -mindepth 1 -maxdepth 1 -type d | head -n1)
+            shopt -s dotglob
+            mv "$inner"/* "$RUNNER_TEMP/site_new"/
+            rmdir "$inner"
+          fi
+
+          echo "::group::After unzip (root)"
+          ls -la "$RUNNER_TEMP/site_new"
+          echo "::endgroup::"
+
+          test -f "$RUNNER_TEMP/site_new/index.html" || { echo "::error::ZIP must contain index.html at root"; exit 1; }
+
+      - name: Switch to target branch
+        shell: bash
+        run: |
+          set -euo pipefail
+          target="${{ github.event.inputs.target_branch || 'site' }}"
+          git fetch origin +refs/heads/*:refs/remotes/origin/* || true
+          if git ls-remote --exit-code --heads origin "$target" >/dev/null 2>&1; then
+            git checkout "$target"
+          else
+            git checkout --orphan "$target"
+            git reset --hard
+          fi
+          echo "TARGET_BRANCH=$target" >> "$GITHUB_ENV"
+
+      - name: Replace contents with extracted site
+        shell: bash
+        run: |
+          set -euo pipefail
+          shopt -s dotglob
+          for i in *; do [[ "$i" == ".git" ]] && continue; rm -rf "$i"; done
+          cp -a "$RUNNER_TEMP/site_new"/. .
+          ls -la
+          test -f index.html || { echo "::error::index.html missing after replace"; exit 1; }
+
+      - name: Commit and push
+        env:
+          GIT_AUTHOR_NAME: github-actions[bot]
+          GIT_AUTHOR_EMAIL: 41898282+github-actions[bot]@users.noreply.github.com
+          GIT_COMMITTER_NAME: github-actions[bot]
+          GIT_COMMITTER_EMAIL: 41898282+github-actions[bot]@users.noreply.github.com
+        shell: bash
+        run: |
+          set -euo pipefail
+          git add -A
+          git commit -m "Import ${{ steps.pick.outputs.zip }} → $TARGET_BRANCH" || echo "No changes"
+          git push -u origin "$TARGET_BRANCH"
